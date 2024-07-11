@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	remoteexecution "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
@@ -32,17 +33,35 @@ func NewActionCacheAssetStore(actionCache, contentAddressableStorage blobstore.B
 
 func (rs *actionCacheAssetStore) actionResultToAsset(ctx context.Context, a *remoteexecution.ActionResult, instance digest.InstanceName) (*asset.Asset, error) {
 	digest := &remoteexecution.Digest{}
-	// Required output directory is not present, look for required
-	// output file
-	for _, file := range a.OutputFiles {
-		if file.Path == "out" {
-			digest = file.Digest
+	assetType := asset.Asset_DIRECTORY
+
+	// Check if there is an output directory in the action result
+	for _, dir := range a.OutputDirectories {
+		if dir.Path == "out" {
+			digest = dir.RootDirectoryDigest
 		}
 	}
+
+	if digest == nil || digest.Hash == "" {
+		assetType = asset.Asset_BLOB
+		// Required output directory is not present, look for required
+		// output file
+		for _, file := range a.OutputFiles {
+			if file.Path == "out" {
+				digest = file.Digest
+			}
+		}
+	}
+
+	if digest == nil || digest.Hash == "" {
+		return nil, fmt.Errorf("could not find digest (either directory or blob) in ActionResult")
+	}
+
 	return &asset.Asset{
 		Digest:      digest,
 		ExpireAt:    getDefaultTimestamp(),
 		LastUpdated: a.ExecutionMetadata.QueuedTimestamp,
+		Type:        assetType,
 	}, nil
 }
 
@@ -156,10 +175,22 @@ func (rs *actionCacheAssetStore) Put(ctx context.Context, ref *asset.AssetRefere
 	}
 	var action *remoteexecution.Action
 	var command *remoteexecution.Command
-	// Create the action with the qualifier directory as the input root
-	action, command, err = assetReferenceToAction(ref, directoryDigest)
-	if err != nil {
-		return err
+	if commandGenerator, err := qualifier.QualifiersToCommand(ref.Qualifiers); err != nil || len(ref.Uris) > 1 {
+		// Create the action with the qualifier directory as the input root
+		action, command, err = assetReferenceToAction(ref, directoryDigest)
+		if err != nil {
+			return err
+		}
+	} else {
+		command = commandGenerator(ref.Uris[0])
+		commandDigest, err := ProtoToDigest(command)
+		if err != nil {
+			return err
+		}
+		action = &remoteexecution.Action{
+			CommandDigest:   commandDigest,
+			InputRootDigest: EmptyDigest,
+		}
 	}
 	actionPb, err := proto.Marshal(action)
 	if err != nil {
@@ -196,14 +227,27 @@ func (rs *actionCacheAssetStore) Put(ctx context.Context, ref *asset.AssetRefere
 	}
 
 	actionResult := &remoteexecution.ActionResult{
-		OutputFiles: []*remoteexecution.OutputFile{{
-			Path:   "out",
-			Digest: data.Digest,
-		}},
 		ExecutionMetadata: &remoteexecution.ExecutedActionMetadata{
 			QueuedTimestamp: data.LastUpdated,
 		},
 	}
+
+	if data.Type == asset.Asset_DIRECTORY {
+		// Use digest as a root directory digest
+		actionResult.OutputDirectories = []*remoteexecution.OutputDirectory{{
+			Path:                "out",
+			RootDirectoryDigest: data.Digest,
+		}}
+	} else if data.Type == asset.Asset_BLOB {
+		// Use the digest as an output file digest
+		actionResult.OutputFiles = []*remoteexecution.OutputFile{{
+			Path:   "out",
+			Digest: data.Digest,
+		}}
+	} else {
+		return fmt.Errorf("unknown asset type %v", data.Type)
+	}
+
 	return rs.actionCache.Put(ctx, bbActionDigest, buffer.NewProtoBufferFromProto(actionResult, buffer.UserProvided))
 }
 
