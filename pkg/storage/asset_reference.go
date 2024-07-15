@@ -49,7 +49,7 @@ func assetReferenceToAction(ar *asset.AssetReference, directoryDigest *remoteexe
 	command := &remoteexecution.Command{
 		Arguments:             ar.Uris,
 		OutputPaths:           []string{"out"},
-		OutputDirectoryFormat: remoteexecution.Command_DIRECTORY_ONLY,
+		OutputDirectoryFormat: remoteexecution.Command_TREE_AND_DIRECTORY,
 	}
 	commandDigest, err := ProtoToDigest(command)
 	if err != nil {

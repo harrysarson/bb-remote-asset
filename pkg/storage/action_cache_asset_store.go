@@ -31,6 +31,22 @@ func NewActionCacheAssetStore(actionCache, contentAddressableStorage blobstore.B
 	}
 }
 
+func (rs *actionCacheAssetStore) assetToDirectory(ctx context.Context, asset *asset.Asset, instance digest.InstanceName) (*remoteexecution.Directory, error) {
+	digestFunction, err := instance.GetDigestFunction(remoteexecution.DigestFunction_UNKNOWN, len(asset.Digest.GetHash()))
+	if err != nil {
+		return nil, err
+	}
+	digest, err := digestFunction.NewDigestFromProto(asset.Digest)
+	if err != nil {
+		return nil, err
+	}
+	directory, err := rs.contentAddressableStorage.Get(ctx, digest).ToProto(&remoteexecution.Directory{}, rs.maximumMessageSizeBytes)
+	if err != nil {
+		return nil, err
+	}
+	return directory.(*remoteexecution.Directory), nil
+}
+
 func (rs *actionCacheAssetStore) actionResultToAsset(ctx context.Context, a *remoteexecution.ActionResult, instance digest.InstanceName) (*asset.Asset, error) {
 	digest := &remoteexecution.Digest{}
 	assetType := asset.Asset_DIRECTORY
@@ -233,10 +249,43 @@ func (rs *actionCacheAssetStore) Put(ctx context.Context, ref *asset.AssetRefere
 	}
 
 	if data.Type == asset.Asset_DIRECTORY {
+		d, err := rs.assetToDirectory(ctx, data, instance)
+
+		if err != nil {
+			// Users will hit this if they upload an digest referencing an
+			// arbitary Blob in `PushDirectory` or a digest that does not
+			// reference any blob at all.
+			return fmt.Errorf("digest in directory asset does not reference a Directory: %v", err)
+		}
+
+		// If it is a directory, construct a tree from it as tree digest is
+		// required for action result
+		tree, err := rs.directoryToTree(ctx, d, instance)
+		if err != nil {
+			return err
+		}
+		treePb, err := proto.Marshal(tree)
+		if err != nil {
+			return err
+		}
+		treeDigest, err := ProtoToDigest(tree)
+		if err != nil {
+			return err
+		}
+		bbTreeDigest, err := digestFunction.NewDigestFromProto(treeDigest)
+		if err != nil {
+			return err
+		}
+		err = rs.contentAddressableStorage.Put(ctx, bbTreeDigest, buffer.NewCASBufferFromByteSlice(bbTreeDigest, treePb, buffer.UserProvided))
+		if err != nil {
+			return err
+		}
+
 		// Use digest as a root directory digest
 		actionResult.OutputDirectories = []*remoteexecution.OutputDirectory{{
 			Path:                "out",
 			RootDirectoryDigest: data.Digest,
+			TreeDigest:          treeDigest,
 		}}
 	} else if data.Type == asset.Asset_BLOB {
 		// Use the digest as an output file digest
@@ -249,6 +298,46 @@ func (rs *actionCacheAssetStore) Put(ctx context.Context, ref *asset.AssetRefere
 	}
 
 	return rs.actionCache.Put(ctx, bbActionDigest, buffer.NewProtoBufferFromProto(actionResult, buffer.UserProvided))
+}
+
+func (rs *actionCacheAssetStore) directoryToTree(ctx context.Context, directory *remoteexecution.Directory, instance digest.InstanceName) (*remoteexecution.Tree, error) {
+	children := []*remoteexecution.Directory{}
+	for _, node := range directory.Directories {
+		nodeChildren, err := rs.directoryNodeToDirectories(ctx, instance, node)
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, nodeChildren...)
+	}
+
+	return &remoteexecution.Tree{
+		Root:     directory,
+		Children: children,
+	}, nil
+}
+
+func (rs *actionCacheAssetStore) directoryNodeToDirectories(ctx context.Context, instance digest.InstanceName, node *remoteexecution.DirectoryNode) ([]*remoteexecution.Directory, error) {
+	digestFunction, err := instance.GetDigestFunction(remoteexecution.DigestFunction_UNKNOWN, len(node.GetDigest().GetHash()))
+	if err != nil {
+		return nil, err
+	}
+	digest, err := digestFunction.NewDigestFromProto(node.Digest)
+	if err != nil {
+		return nil, err
+	}
+	directory, err := rs.contentAddressableStorage.Get(ctx, digest).ToProto(&remoteexecution.Directory{}, rs.maximumMessageSizeBytes)
+	if err != nil {
+		return nil, err
+	}
+	directories := []*remoteexecution.Directory{directory.(*remoteexecution.Directory)}
+	for _, node := range directory.(*remoteexecution.Directory).Directories {
+		children, err := rs.directoryNodeToDirectories(ctx, instance, node)
+		if err != nil {
+			return nil, err
+		}
+		directories = append(directories, children...)
+	}
+	return directories, nil
 }
 
 func getDefaultTimestamp() *timestamppb.Timestamp {

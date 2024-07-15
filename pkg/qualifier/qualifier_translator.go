@@ -55,7 +55,7 @@ func gitCommand(qualifiers map[string]string) func(string) *remoteexecution.Comm
 		return &remoteexecution.Command{
 			Arguments:             []string{"sh", "-c", script},
 			OutputPaths:           []string{"out"},
-			OutputDirectoryFormat: remoteexecution.Command_DIRECTORY_ONLY,
+			OutputDirectoryFormat: remoteexecution.Command_TREE_AND_DIRECTORY,
 		}
 	}
 }
@@ -81,7 +81,7 @@ func octetStreamCommand(qualifiers map[string]string) func(string) *remoteexecut
 		return &remoteexecution.Command{
 			Arguments:             []string{"sh", "-c", script},
 			OutputPaths:           []string{"out"},
-			OutputDirectoryFormat: remoteexecution.Command_DIRECTORY_ONLY,
+			OutputDirectoryFormat: remoteexecution.Command_TREE_AND_DIRECTORY,
 		}
 	}
 }
