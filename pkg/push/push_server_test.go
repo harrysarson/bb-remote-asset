@@ -120,10 +120,14 @@ func TestPushServerInvalidArgumentFailure(t *testing.T) {
 	assetStore := storage.NewBlobAccessAssetStore(backend, 16*1024*1024)
 	pushServer := push.NewAssetPushServer(assetStore, map[digest.InstanceName]bool{instanceName: true})
 
+	noUriError := status.Error(codes.InvalidArgument, "At least one URI required")
+
 	_, err = pushServer.PushBlob(ctx, blobRequest)
-	require.Equal(t, status.Error(codes.InvalidArgument, "PushBlob requires at least one URI"), err)
+	require.ErrorIs(t, err, noUriError)
+	require.ErrorContains(t, err, "PushBlob failed")
 	_, err = pushServer.PushDirectory(ctx, directoryRequest)
-	require.Equal(t, status.Error(codes.InvalidArgument, "PushDirectory requires at least one URI"), err)
+	require.ErrorIs(t, err, noUriError)
+	require.ErrorContains(t, err, "PushDirectory failed")
 }
 
 func TestPushServerBadInstanceName(t *testing.T) {
@@ -153,8 +157,12 @@ func TestPushServerBadInstanceName(t *testing.T) {
 	assetStore := storage.NewBlobAccessAssetStore(backend, 16*1024*1024)
 	pushServer := push.NewAssetPushServer(assetStore, map[digest.InstanceName]bool{instanceName: true})
 
+	badInstanceError := status.Error(codes.PermissionDenied, "This service does not accept updates for instance \"bad\"")
+
 	_, err = pushServer.PushBlob(ctx, blobRequest)
-	require.Equal(t, status.Error(codes.PermissionDenied, "This service does not accept Blobs for instance \"bad\""), err)
+	require.ErrorIs(t, err, badInstanceError)
+	require.ErrorContains(t, err, "PushBlob failed")
 	_, err = pushServer.PushDirectory(ctx, directoryRequest)
-	require.Equal(t, status.Error(codes.PermissionDenied, "This service does not accept Directories for instance \"bad\""), err)
+	require.ErrorIs(t, err, badInstanceError)
+	require.ErrorContains(t, err, "PushDirectory failed")
 }

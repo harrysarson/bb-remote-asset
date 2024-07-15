@@ -60,7 +60,7 @@ func TestFetchBlobCaching(t *testing.T) {
 				require.True(t, proto.Equal(a.Digest, blobDigest))
 				require.Equal(t, asset.Asset_BLOB, a.Type)
 				return nil
-			}).After(fetchBlobCall)
+			}).After(fetchBlobCall).Times(2)
 		response, err := cachingFetcher.FetchBlob(ctx, request)
 		require.Nil(t, err)
 		require.Equal(t, response.Status.Code, int32(codes.OK))
@@ -94,6 +94,7 @@ func TestFetchDirectoryCaching(t *testing.T) {
 	}
 	dirDigest := &remoteexecution.Digest{Hash: "d0d829c4c0ce64787cb1c998a9c29a109f8ed005633132fda4f29982487b04db", SizeBytes: 123}
 	refDigest, err := storage.AssetReferenceToDigest(storage.NewAssetReference([]string{uri}, []*remoteasset.Qualifier{}), instanceName)
+	ref2Digest, err := storage.AssetReferenceToDigest(storage.NewAssetReference([]string{"a completely different URI"}, []*remoteasset.Qualifier{}), instanceName)
 	require.NoError(t, err)
 
 	backend := mock.NewMockBlobAccess(ctrl)
@@ -108,6 +109,36 @@ func TestFetchDirectoryCaching(t *testing.T) {
 			Uri:                 uri,
 			RootDirectoryDigest: dirDigest,
 		}, nil).After(backendGetCall)
+		backend.EXPECT().Put(ctx, refDigest, gomock.Any()).DoAndReturn(
+			func(ctx context.Context, digest bb_digest.Digest, b buffer.Buffer) error {
+				m, err := b.ToProto(&asset.Asset{}, 1000)
+				require.NoError(t, err)
+				a := m.(*asset.Asset)
+				require.True(t, proto.Equal(a.Digest, dirDigest))
+				require.Equal(t, asset.Asset_DIRECTORY, a.Type)
+				return nil
+			}).After(fetchDirectoryCall).Times(2)
+		response, err := cachingFetcher.FetchDirectory(ctx, request)
+		require.Nil(t, err)
+		require.Equal(t, response.Status.Code, int32(codes.OK))
+	})
+
+	t.Run("Fetcher changes URI", func(t *testing.T) {
+		backendGetCall := backend.EXPECT().Get(ctx, refDigest).Return(buffer.NewBufferFromError(status.Error(codes.NotFound, "Directory not found")))
+		fetchDirectoryCall := mockFetcher.EXPECT().FetchDirectory(ctx, request).Return(&remoteasset.FetchDirectoryResponse{
+			Status:              status.New(codes.OK, "Success!").Proto(),
+			Uri:                 "a completely different URI",
+			RootDirectoryDigest: dirDigest,
+		}, nil).After(backendGetCall)
+		backend.EXPECT().Put(ctx, ref2Digest, gomock.Any()).DoAndReturn(
+			func(ctx context.Context, digest bb_digest.Digest, b buffer.Buffer) error {
+				m, err := b.ToProto(&asset.Asset{}, 1000)
+				require.NoError(t, err)
+				a := m.(*asset.Asset)
+				require.True(t, proto.Equal(a.Digest, dirDigest))
+				require.Equal(t, asset.Asset_DIRECTORY, a.Type)
+				return nil
+			}).After(fetchDirectoryCall)
 		backend.EXPECT().Put(ctx, refDigest, gomock.Any()).DoAndReturn(
 			func(ctx context.Context, digest bb_digest.Digest, b buffer.Buffer) error {
 				m, err := b.ToProto(&asset.Asset{}, 1000)

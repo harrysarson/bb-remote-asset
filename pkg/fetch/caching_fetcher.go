@@ -2,11 +2,13 @@ package fetch
 
 import (
 	"context"
+	"fmt"
 	"time"
 
+	"github.com/buildbarn/bb-remote-asset/pkg/proto/asset"
 	"github.com/buildbarn/bb-remote-asset/pkg/qualifier"
 	"github.com/buildbarn/bb-remote-asset/pkg/storage"
-	bb_digest "github.com/buildbarn/bb-storage/pkg/digest"
+	"github.com/buildbarn/bb-storage/pkg/digest"
 	"github.com/buildbarn/bb-storage/pkg/util"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -31,49 +33,34 @@ func NewCachingFetcher(fetcher Fetcher, assetStore storage.AssetStore) Fetcher {
 }
 
 func (cf *cachingFetcher) FetchBlob(ctx context.Context, req *remoteasset.FetchBlobRequest) (*remoteasset.FetchBlobResponse, error) {
-	instanceName, err := bb_digest.NewInstanceName(req.InstanceName)
+	instanceName, err := digest.NewInstanceName(req.InstanceName)
+
 	if err != nil {
 		return nil, util.StatusWrapf(err, "Invalid instance name %#v", req.InstanceName)
 	}
 
-	var oldestContentAccepted time.Time = time.Unix(0, 0)
-	if req.OldestContentAccepted != nil {
-		if err := req.OldestContentAccepted.CheckValid(); err != nil {
-			return nil, err
-		}
-		oldestContentAccepted = req.OldestContentAccepted.AsTime()
+	assetRef, digest, err := (&storage.GetRequest{
+		InstanceName:          instanceName,
+		OldestContentAccepted: req.OldestContentAccepted,
+		Uris:                  req.Uris,
+		Qualifiers:            req.Qualifiers,
+	}).DoGet(ctx, cf.assetStore)
+
+	if err != nil {
+		return nil, err
 	}
 
-	// Check assetStore
-	for _, uri := range req.Uris {
-		assetRef := storage.NewAssetReference([]string{uri}, req.Qualifiers)
-		assetData, err := cf.assetStore.Get(ctx, assetRef, instanceName)
-		if err != nil {
-			continue
-		}
-
-		// Check whether the asset has expired, making sure ExpireAt was set
-		if assetData.ExpireAt != nil {
-			expireTime := assetData.ExpireAt.AsTime()
-			if expireTime.Before(time.Now()) && !expireTime.Equal(time.Unix(0, 0)) {
-				continue
-			}
-		}
-
-		// Check that content is newer than the oldest accepted by the request
-		if oldestContentAccepted != time.Unix(0, 0) {
-			updateTime := assetData.LastUpdated.AsTime()
-			if updateTime.Before(oldestContentAccepted) {
-				continue
-			}
+	if digest != nil {
+		if len(assetRef.Uris) != 1 {
+			panic("storage.Get should create assetRef with one URI")
 		}
 
 		// Successful retrieval from the asset reference cache
 		return &remoteasset.FetchBlobResponse{
 			Status:     status.New(codes.OK, "Blob fetched successfully from asset cache").Proto(),
-			Uri:        uri,
+			Uri:        assetRef.Uris[0],
 			Qualifiers: req.Qualifiers,
-			BlobDigest: assetData.Digest,
+			BlobDigest: digest,
 		}, nil
 	}
 
@@ -87,66 +74,66 @@ func (cf *cachingFetcher) FetchBlob(ctx context.Context, req *remoteasset.FetchB
 		return response, nil
 	}
 
-	// Cache fetched blob with single URI
-	assetRef := storage.NewAssetReference([]string{response.Uri}, response.Qualifiers)
-	assetData := storage.NewBlobAsset(response.BlobDigest, getDefaultTimestamp())
-	err = cf.assetStore.Put(ctx, assetRef, assetData, instanceName)
+	// Cache fetched blob with the single URI from Response.
+	err = (&storage.PutRequest{
+		InstanceName: instanceName,
+		Uris:         []string{response.Uri},
+		Qualifiers:   response.Qualifiers,
+		ExpireAt:     getDefaultTimestamp(),
+		Digest:       response.BlobDigest,
+		AssetType:    asset.Asset_BLOB,
+	}).DoPut(ctx, cf.assetStore)
+
 	if err != nil {
-		return response, err
+		return response, fmt.Errorf("PushBlob failed putting asset: %w", err)
 	}
-	if len(req.Uris) > 1 {
-		// Cache fetched blob with list of URIs
-		assetRef = storage.NewAssetReference(req.Uris, assetRef.Qualifiers)
-		err = cf.assetStore.Put(ctx, assetRef, assetData, instanceName)
-		if err != nil {
-			return response, err
-		}
+
+	// Cache fetched blob using uris/qualifiers from Request.
+	err = (&storage.PutRequest{
+		InstanceName: instanceName,
+		Uris:         req.Uris,
+		Qualifiers:   req.Qualifiers,
+		ExpireAt:     getDefaultTimestamp(),
+		Digest:       response.BlobDigest,
+		AssetType:    asset.Asset_BLOB,
+	}).DoPut(ctx, cf.assetStore)
+
+	if err != nil {
+		return nil, fmt.Errorf("PushBlob failed putting asset from request: %w", err)
 	}
 
 	return response, nil
 }
 
 func (cf *cachingFetcher) FetchDirectory(ctx context.Context, req *remoteasset.FetchDirectoryRequest) (*remoteasset.FetchDirectoryResponse, error) {
-	instanceName, err := bb_digest.NewInstanceName(req.InstanceName)
+
+	instanceName, err := digest.NewInstanceName(req.InstanceName)
+	if err != nil {
+		return nil, util.StatusWrapf(err, "Invalid instance name %#v", req.InstanceName)
+	}
+
+	assetRef, digest, err := (&storage.GetRequest{
+		InstanceName:          instanceName,
+		OldestContentAccepted: req.OldestContentAccepted,
+		Uris:                  req.Uris,
+		Qualifiers:            req.Qualifiers,
+	}).DoGet(ctx, cf.assetStore)
+
 	if err != nil {
 		return nil, err
 	}
 
-	oldestContentAccepted := time.Unix(0, 0)
-	if req.OldestContentAccepted != nil {
-		oldestContentAccepted = req.OldestContentAccepted.AsTime()
-	}
-
-	// Check refStore
-	for _, uri := range req.Uris {
-		assetRef := storage.NewAssetReference([]string{uri}, req.Qualifiers)
-		assetData, err := cf.assetStore.Get(ctx, assetRef, instanceName)
-		if err != nil {
-			continue
-		}
-
-		// Check whether the asset has expired, making sure ExpireAt was set
-		if assetData.ExpireAt != nil {
-			expireTime := assetData.ExpireAt.AsTime()
-			if expireTime.Before(time.Now()) && !expireTime.Equal(time.Unix(0, 0)) {
-				continue
-			}
-		}
-
-		// Check that content is newer than the oldest accepted by the request
-		if oldestContentAccepted != time.Unix(0, 0) {
-			updateTime := assetData.LastUpdated.AsTime()
-			if updateTime.Before(oldestContentAccepted) {
-				continue
-			}
+	if digest != nil {
+		if len(assetRef.Uris) != 1 {
+			panic("storage.Get should create assetRef with one URI")
 		}
 
 		// Successful retrieval from the asset reference cache
 		return &remoteasset.FetchDirectoryResponse{
 			Status:              status.New(codes.OK, "Directory fetched successfully from asset cache").Proto(),
-			Uri:                 uri,
+			Uri:                 assetRef.Uris[0],
 			Qualifiers:          req.Qualifiers,
-			RootDirectoryDigest: assetData.Digest,
+			RootDirectoryDigest: digest,
 		}, nil
 	}
 
@@ -157,20 +144,32 @@ func (cf *cachingFetcher) FetchDirectory(ctx context.Context, req *remoteasset.F
 		return nil, err
 	}
 
-	// Cache fetched blob with single URI
-	assetRef := storage.NewAssetReference([]string{response.Uri}, response.Qualifiers)
-	assetData := storage.NewDirectoryAsset(response.RootDirectoryDigest, getDefaultTimestamp())
-	err = cf.assetStore.Put(ctx, assetRef, assetData, instanceName)
+	// Cache fetched blob with the single URI from Response.
+	err = (&storage.PutRequest{
+		InstanceName: instanceName,
+		Uris:         []string{response.Uri},
+		Qualifiers:   response.Qualifiers,
+		ExpireAt:     getDefaultTimestamp(),
+		Digest:       response.RootDirectoryDigest,
+		AssetType:    asset.Asset_DIRECTORY,
+	}).DoPut(ctx, cf.assetStore)
+
 	if err != nil {
-		return response, err
+		return response, fmt.Errorf("PushDirectory failed putting asset: %w", err)
 	}
-	if len(req.Uris) > 1 {
-		// Cache fetched blob with list of URIs
-		assetRef = storage.NewAssetReference(req.Uris, assetRef.Qualifiers)
-		err = cf.assetStore.Put(ctx, assetRef, assetData, instanceName)
-		if err != nil {
-			return response, err
-		}
+
+	// Cache fetched blob using uris/qualifiers from Request.
+	err = (&storage.PutRequest{
+		InstanceName: instanceName,
+		Uris:         req.Uris,
+		Qualifiers:   req.Qualifiers,
+		ExpireAt:     getDefaultTimestamp(),
+		Digest:       response.RootDirectoryDigest,
+		AssetType:    asset.Asset_DIRECTORY,
+	}).DoPut(ctx, cf.assetStore)
+
+	if err != nil {
+		return nil, fmt.Errorf("PushDirectory failed putting asset (from request): %w", err)
 	}
 
 	return response, nil

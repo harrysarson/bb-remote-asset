@@ -2,8 +2,10 @@ package push
 
 import (
 	"context"
+	"fmt"
 
 	remoteasset "github.com/bazelbuild/remote-apis/build/bazel/remote/asset/v1"
+	"github.com/buildbarn/bb-remote-asset/pkg/proto/asset"
 	"github.com/buildbarn/bb-remote-asset/pkg/storage"
 	"github.com/buildbarn/bb-storage/pkg/digest"
 	"github.com/buildbarn/bb-storage/pkg/util"
@@ -25,70 +27,73 @@ func NewAssetPushServer(AssetStore storage.AssetStore, allowUpdatesForInstances 
 	}
 }
 
-func (s *assetPushServer) PushBlob(ctx context.Context, req *remoteasset.PushBlobRequest) (*remoteasset.PushBlobResponse, error) {
-	if len(req.Uris) == 0 {
-		return nil, status.Errorf(codes.InvalidArgument, "PushBlob requires at least one URI")
-	}
-
-	instanceName, err := digest.NewInstanceName(req.InstanceName)
+func (s *assetPushServer) instanceName(instanceNameStr string) (digest.InstanceName, error) {
+	instanceName, err := digest.NewInstanceName(instanceNameStr)
 	if err != nil {
-		return nil, util.StatusWrapf(err, "Invalid instance name %#v", req.InstanceName)
+		return digest.InstanceName{}, util.StatusWrapf(err, "Invalid instance name %#v", instanceNameStr)
 	}
 
 	if !s.allowUpdatesForInstances[instanceName] {
-		return nil, status.Errorf(codes.PermissionDenied, "This service does not accept Blobs for instance %#v", req.InstanceName)
+		return digest.InstanceName{}, status.Errorf(
+			codes.PermissionDenied,
+			"This service does not accept updates for instance %#v",
+			instanceNameStr,
+		)
 	}
 
-	assetRef := storage.NewAssetReference(req.Uris, req.Qualifiers)
-	assetData := storage.NewBlobAsset(req.BlobDigest, req.ExpireAt)
-	err = s.assetStore.Put(ctx, assetRef, assetData, instanceName)
+	return instanceName, nil
+}
+
+func (s *assetPushServer) PushBlob(ctx context.Context, req *remoteasset.PushBlobRequest) (*remoteasset.PushBlobResponse, error) {
+
+	instanceName, err := s.instanceName(req.InstanceName)
+
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("PushBlob failed validating instance name: %w", err)
 	}
 
-	if len(req.Uris) > 1 {
-		for _, uri := range req.Uris {
-			assetRef := storage.NewAssetReference([]string{uri}, req.Qualifiers)
-			assetData := storage.NewBlobAsset(req.BlobDigest, req.ExpireAt)
-			err = s.assetStore.Put(ctx, assetRef, assetData, instanceName)
-			if err != nil {
-				return nil, err
-			}
-		}
+	err = (&storage.PutRequest{
+		InstanceName: instanceName,
+		Uris:         req.Uris,
+		Qualifiers:   req.Qualifiers,
+		ExpireAt:     req.ExpireAt,
+		Digest:       req.BlobDigest,
+		AssetType:    asset.Asset_BLOB,
+	}).DoPut(
+		ctx,
+		s.assetStore,
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("PushBlob failed putting asset with eeror: %w", err)
 	}
+
 	return &remoteasset.PushBlobResponse{}, nil
 }
 
 func (s *assetPushServer) PushDirectory(ctx context.Context, req *remoteasset.PushDirectoryRequest) (*remoteasset.PushDirectoryResponse, error) {
-	if len(req.Uris) == 0 {
-		return nil, status.Errorf(codes.InvalidArgument, "PushDirectory requires at least one URI")
-	}
 
-	instanceName, err := digest.NewInstanceName(req.InstanceName)
+	instanceName, err := s.instanceName(req.InstanceName)
+
 	if err != nil {
-		return nil, util.StatusWrapf(err, "Invalid instance name %#v", req.InstanceName)
+		return nil, fmt.Errorf("PushDirectory failed validating instance name: %w", err)
 	}
 
-	if !s.allowUpdatesForInstances[instanceName] {
-		return nil, status.Errorf(codes.PermissionDenied, "This service does not accept Directories for instance %#v", req.InstanceName)
-	}
+	err = (&storage.PutRequest{
+		InstanceName: instanceName,
+		Uris:         req.Uris,
+		Qualifiers:   req.Qualifiers,
+		ExpireAt:     req.ExpireAt,
+		Digest:       req.RootDirectoryDigest,
+		AssetType:    asset.Asset_DIRECTORY,
+	}).DoPut(
+		ctx,
+		s.assetStore,
+	)
 
-	assetRef := storage.NewAssetReference(req.Uris, req.Qualifiers)
-	assetData := storage.NewDirectoryAsset(req.RootDirectoryDigest, req.ExpireAt)
-	err = s.assetStore.Put(ctx, assetRef, assetData, instanceName)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("PushDirectory failed with eeror: %w", err)
 	}
 
-	if len(req.Uris) > 1 {
-		for _, uri := range req.Uris {
-			assetRef := storage.NewAssetReference([]string{uri}, req.Qualifiers)
-			assetData := storage.NewDirectoryAsset(req.RootDirectoryDigest, req.ExpireAt)
-			err = s.assetStore.Put(ctx, assetRef, assetData, instanceName)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
 	return &remoteasset.PushDirectoryResponse{}, nil
 }
